@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/bluelife8/kelma-sync/internal/auth"
+	"github.com/jdmc43/kelma-sync/internal/auth"
 )
 
 type registerRequest struct {

@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/bluelife8/kelma-sync/internal/auth"
+	"github.com/jdmc43/kelma-sync/internal/auth"
 )
 
 // Internal endpoints let the trusted Kelma Immersion backend mint sync tokens

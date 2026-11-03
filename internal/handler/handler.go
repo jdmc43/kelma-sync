@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/bluelife8/kelma-sync/internal/auth"
-	"github.com/bluelife8/kelma-sync/internal/model"
-	"github.com/bluelife8/kelma-sync/internal/storage"
+	"github.com/jdmc43/kelma-sync/internal/auth"
+	"github.com/jdmc43/kelma-sync/internal/model"
+	"github.com/jdmc43/kelma-sync/internal/storage"
 )
 
 const maxRequestBodyBytes = 140 << 20

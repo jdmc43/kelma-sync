@@ -1,4 +1,4 @@
-module github.com/bluelife8/kelma-sync
+module github.com/jdmc43/kelma-sync
 
 go 1.26.5
 

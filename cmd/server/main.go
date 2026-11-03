@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bluelife8/kelma-sync/internal/db"
-	"github.com/bluelife8/kelma-sync/internal/handler"
-	"github.com/bluelife8/kelma-sync/internal/storage"
+	"github.com/jdmc43/kelma-sync/internal/db"
+	"github.com/jdmc43/kelma-sync/internal/handler"
+	"github.com/jdmc43/kelma-sync/internal/storage"
 )
 
 func main() {

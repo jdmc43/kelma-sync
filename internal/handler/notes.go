@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/bluelife8/kelma-sync/internal/model"
+	"github.com/jdmc43/kelma-sync/internal/model"
 )
 
 // GetNote returns the full note record for a guid.

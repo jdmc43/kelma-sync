@@ -3,7 +3,7 @@ name = "kelma-hash"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/bluelife8/kelma-sync"
+repository = "https://github.com/jdmc43/kelma-sync"
 
 [lib]
 name = "kelma_hash"

@@ -5,7 +5,7 @@
 Please do not open a public issue for a suspected vulnerability. Use GitHub's
 private vulnerability reporting for this repository:
 
-https://github.com/bluelife8/kelma-sync/security/advisories/new
+https://github.com/jdmc43/kelma-sync/security/advisories/new
 
 Include affected versions, impact, reproduction steps, and any suggested fix.
 Reports involving cross-account data access, authentication bypass, token or

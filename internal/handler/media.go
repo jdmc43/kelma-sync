@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/bluelife8/kelma-sync/internal/storage"
+	"github.com/jdmc43/kelma-sync/internal/storage"
 )
 
 const maxMediaBytes = 100 << 20 // 100 MiB

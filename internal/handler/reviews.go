@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bluelife8/kelma-sync/internal/model"
+	"github.com/jdmc43/kelma-sync/internal/model"
 )
 
 // putReviewRequest is an immutable Anki revlog row. ReviewID is Anki's

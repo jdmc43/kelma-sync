@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/bluelife8/kelma-sync/internal/model"
+	"github.com/jdmc43/kelma-sync/internal/model"
 )
 
 // GetCard returns the full card record for a card_id.

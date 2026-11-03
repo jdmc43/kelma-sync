@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/bluelife8/kelma-sync/internal/db"
-	"github.com/bluelife8/kelma-sync/internal/model"
-	"github.com/bluelife8/kelma-sync/internal/storage"
+	"github.com/jdmc43/kelma-sync/internal/db"
+	"github.com/jdmc43/kelma-sync/internal/model"
+	"github.com/jdmc43/kelma-sync/internal/storage"
 )
 
 func testServer(t *testing.T) (*Handler, *http.ServeMux, *pgxpool.Pool) {

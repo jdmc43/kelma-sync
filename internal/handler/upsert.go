@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/bluelife8/kelma-sync/internal/model"
+	"github.com/jdmc43/kelma-sync/internal/model"
 )
 
 // This file holds the single source of truth for writing each resource type.
