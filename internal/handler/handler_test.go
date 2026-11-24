@@ -1,14 +1,18 @@
 package handler
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jdmc43/kelma-sync/internal/db"
@@ -44,7 +48,9 @@ func testServer(t *testing.T) (*Handler, *http.ServeMux, *pgxpool.Pool) {
 func resetDB(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(), `
-		TRUNCATE tokens, clients, tombstones, media, reviews, study_days, cards, notes, decks, notetypes, users RESTART IDENTITY CASCADE
+		TRUNCATE scheduler_projections, scheduler_profiles, study_day_policies, tokens, clients,
+		         tombstones, media, reviews, study_days, cards, notes, decks,
+		         notetypes, users, account_deletions, deck_limit_history RESTART IDENTITY CASCADE
 	`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
@@ -184,9 +190,32 @@ func TestPutAndGetNote(t *testing.T) {
 	rr = reqJSON(t, mux, "PUT", "/v2/cards/123", map[string]any{
 		"note_guid": "guid-1", "deck_name": "Compare Deck", "ord": 0,
 		"scheduling": map[string]any{}, "client_modified_at": "2026-07-10T00:00:00Z",
+		"created_at": "2020-02-03T04:05:06Z",
 	}, loginToken)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("put card: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = reqJSON(t, mux, "GET", "/v2/cards/123", nil, loginToken)
+	var card model.Card
+	if err := json.Unmarshal(rr.Body.Bytes(), &card); err != nil {
+		t.Fatalf("decode card: %v", err)
+	}
+	if card.CreatedAt == nil || card.CreatedAt.UTC().Format("2006-01-02T15:04:05Z") != "2020-02-03T04:05:06Z" {
+		t.Fatalf("unexpected card creation date: %+v", card.CreatedAt)
+	}
+	rr = reqJSON(t, mux, "PUT", "/v2/cards/123", map[string]any{
+		"note_guid": "guid-1", "deck_name": "Compare Deck", "ord": 0,
+		"scheduling": map[string]any{}, "client_modified_at": "2026-07-10T01:00:00Z",
+		"created_at": "2021-01-01T00:00:00Z",
+	}, loginToken)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update card: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &card); err != nil {
+		t.Fatalf("decode updated card: %v", err)
+	}
+	if card.CreatedAt == nil || card.CreatedAt.UTC().Format("2006-01-02") != "2020-02-03" {
+		t.Fatalf("card creation date was overwritten: %+v", card.CreatedAt)
 	}
 	rr = reqJSON(t, mux, "GET", "/v2/sync/manifest", nil, loginToken)
 	var manifest struct {
@@ -442,6 +471,7 @@ func TestImmersionCardFastPathAndSummaries(t *testing.T) {
 		"card": map[string]any{
 			"card_id": int64(9001), "ord": 0,
 			"scheduling": map[string]any{"type": 2, "queue": 2, "ivl": 30},
+			"created_at": "2026-07-01T12:34:56.789Z",
 		},
 		"media_files": []map[string]any{{
 			"filename": "fast-card.mp3", "data_base64": base64.StdEncoding.EncodeToString([]byte("test audio")),
@@ -464,6 +494,7 @@ func TestImmersionCardFastPathAndSummaries(t *testing.T) {
 	// Retrying the same app card is idempotent even if the caller generated a
 	// different candidate card id after losing the first response.
 	payload["card"].(map[string]any)["card_id"] = int64(9002)
+	payload["card"].(map[string]any)["created_at"] = "2026-07-02T00:00:00Z"
 	rr = reqJSON(t, mux, "POST", "/v2/immersion/cards", payload, token)
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("immersion retry: got %d body=%s", rr.Code, rr.Body.String())
@@ -483,6 +514,16 @@ func TestImmersionCardFastPathAndSummaries(t *testing.T) {
 	}
 	if cardCount != 1 || noteCount != 1 {
 		t.Fatalf("idempotent retry left cards=%d notes=%d", cardCount, noteCount)
+	}
+	var storedCreatedAt time.Time
+	if err := pool.QueryRow(
+		context.Background(),
+		`SELECT created_at FROM cards WHERE card_id=9001`,
+	).Scan(&storedCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if storedCreatedAt.UTC().Format(time.RFC3339Nano) != "2026-07-01T12:34:56.789Z" {
+		t.Fatalf("immersion creation date was not preserved: %s", storedCreatedAt)
 	}
 
 	rr = reqJSON(t, mux, "GET", "/v2/summary/decks", nil, token)
@@ -515,15 +556,150 @@ func TestImmersionCardFastPathAndSummaries(t *testing.T) {
 		if err := json.Unmarshal(rr.Body.Bytes(), &states); err != nil {
 			t.Fatal(err)
 		}
-		if rr.Code != http.StatusOK || len(states.Cards) != 1 || states.Cards[0].Ivl != 30 || len(states.Cards[0].Fields) != 2 {
+		if rr.Code != http.StatusOK || len(states.Cards) != 1 ||
+			states.Cards[0].Ivl != 0 || states.Cards[0].ProjectionStatus != "pending" ||
+			states.Cards[0].StudyState != "active" || len(states.Cards[0].Fields) != 2 {
 			t.Fatalf("unexpected states for %s: code=%d body=%s", path, rr.Code, rr.Body.String())
 		}
+	}
+
+	rr = reqJSON(t, mux, "GET", "/v2/sync/manifest", nil, token)
+	var manifest model.Manifest
+	if err := json.Unmarshal(rr.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK || len(manifest.Media) != 1 || manifest.Media[0].SizeBytes != 10 {
+		t.Fatalf("manifest media size missing: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = reqJSON(t, mux, "POST", "/v2/media/download-plan", map[string]any{
+		"filenames": []string{"fast-card.mp3", "missing.mp3", "fast-card.mp3"},
+	}, token)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("media download plan: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var plan mediaDownloadPlanResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Files) != 1 || plan.Files[0].Filename != "fast-card.mp3" ||
+		plan.Files[0].URL != "/v2/media/fast-card.mp3" || plan.Files[0].SizeBytes != 10 ||
+		!plan.Files[0].RequiresAuth ||
+		len(plan.Missing) != 1 || plan.Missing[0] != "missing.mp3" {
+		t.Fatalf("unexpected media download plan: %+v", plan)
+	}
+
+	rr = reqJSON(t, mux, "POST", "/v2/media/download-plan", map[string]any{
+		"filenames": make([]string, maxMediaDownloadPlanFiles+1),
+	}, token)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("oversized media plan: got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = reqJSON(t, mux, "POST", "/v2/media/download-tar", map[string]any{
+		"filenames": []string{"fast-card.mp3"},
+	}, token)
+	if rr.Code != http.StatusOK || rr.Header().Get("Content-Type") != "application/x-tar" ||
+		rr.Header().Get("X-Kelma-Media-Files") != "1" || rr.Header().Get("X-Kelma-Media-Bytes") != "10" {
+		t.Fatalf("media TAR: code=%d headers=%v body=%q", rr.Code, rr.Header(), rr.Body.String())
+	}
+	tarReader := tar.NewReader(bytes.NewReader(rr.Body.Bytes()))
+	header, err := tarReader.Next()
+	if err != nil {
+		t.Fatalf("read media TAR header: %v", err)
+	}
+	archived, err := io.ReadAll(tarReader)
+	if err != nil {
+		t.Fatalf("read media TAR body: %v", err)
+	}
+	if header.Name != "0" || header.Size != 10 || string(archived) != "test audio" {
+		t.Fatalf("unexpected media TAR entry: header=%+v body=%q", header, archived)
+	}
+	if _, err := tarReader.Next(); !errors.Is(err, io.EOF) {
+		t.Fatalf("media TAR has trailing entry: %v", err)
+	}
+
+	rr = reqJSON(t, mux, "POST", "/v2/media/download-tar", map[string]any{
+		"filenames": []string{"missing.mp3"},
+	}, token)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing media TAR: got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = reqJSON(t, mux, "POST", "/v2/media/prepare-tar", map[string]any{
+		"filenames": []string{"fast-card.mp3"},
+	}, token)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("prepare media TAR: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var prepared preparedMediaTarResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.JobID == "" || prepared.Files != 1 || prepared.PayloadBytes != 10 || prepared.ArchiveBytes <= 10 {
+		t.Fatalf("unexpected prepared media TAR: %+v", prepared)
+	}
+	rr = reqJSON(t, mux, "GET", "/v2/media/prepared-tar/"+prepared.JobID, nil, token)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get prepared media TAR: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	tarReader = tar.NewReader(bytes.NewReader(rr.Body.Bytes()))
+	header, err = tarReader.Next()
+	if err != nil {
+		t.Fatalf("read prepared media TAR: %v", err)
+	}
+	archived, err = io.ReadAll(tarReader)
+	if err != nil || header.Name != "0" || string(archived) != "test audio" {
+		t.Fatalf("unexpected prepared TAR entry: header=%+v body=%q err=%v", header, archived, err)
+	}
+	rr = reqJSON(t, mux, "DELETE", "/v2/media/prepared-tar/"+prepared.JobID, nil, token)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("downloaded media TAR was not removed automatically: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = reqJSON(t, mux, "GET", "/v2/media/prepared-tar/"+prepared.JobID, nil, token)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("downloaded prepared media TAR remained available: got %d", rr.Code)
+	}
+
+	rr = reqJSON(t, mux, "POST", "/v2/media/prepare-tar", map[string]any{
+		"filenames": []string{"fast-card.mp3"},
+	}, token)
+	if err := json.Unmarshal(rr.Body.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	interrupted := newInterruptedResponseWriter()
+	request := httptest.NewRequest("GET", "/v2/media/prepared-tar/"+prepared.JobID, nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	mux.ServeHTTP(interrupted, request)
+	if interrupted.status != http.StatusOK {
+		t.Fatalf("interrupted prepared media TAR did not start: got %d", interrupted.status)
+	}
+	rr = reqJSON(t, mux, "GET", "/v2/media/prepared-tar/"+prepared.JobID, nil, token)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("interrupted prepared media TAR remained available: got %d", rr.Code)
 	}
 
 	rr = reqJSON(t, mux, "HEAD", "/v2/media/fast-card.mp3", nil, token)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("bundled media missing: got %d", rr.Code)
 	}
+}
+
+type interruptedResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func newInterruptedResponseWriter() *interruptedResponseWriter {
+	return &interruptedResponseWriter{header: make(http.Header)}
+}
+
+func (w *interruptedResponseWriter) Header() http.Header { return w.header }
+
+func (w *interruptedResponseWriter) WriteHeader(status int) { w.status = status }
+
+func (w *interruptedResponseWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("simulated client disconnect")
 }
 
 func TestHealth(t *testing.T) {

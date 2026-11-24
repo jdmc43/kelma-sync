@@ -13,6 +13,7 @@ import (
 
 	"github.com/jdmc43/kelma-sync/internal/db"
 	"github.com/jdmc43/kelma-sync/internal/handler"
+	"github.com/jdmc43/kelma-sync/internal/projection"
 	"github.com/jdmc43/kelma-sync/internal/storage"
 )
 
@@ -60,6 +61,13 @@ func main() {
 	mux := http.NewServeMux()
 	h.Routes(mux)
 
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		projection.NewWorker(pool).Run(workerCtx)
+	}()
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -85,6 +93,7 @@ func main() {
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
 		log.Printf("shutting down…")
+		stopWorker()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
@@ -98,4 +107,6 @@ func main() {
 		log.Fatalf("server: %v", err)
 	}
 	<-idleClosed
+	stopWorker()
+	<-workerDone
 }

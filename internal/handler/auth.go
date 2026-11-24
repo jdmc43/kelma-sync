@@ -46,13 +46,22 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userID := auth.UIDForEmail(req.Username)
+	allowed, err := h.accountActivationAllowed(r.Context(), userID, true)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "account state lookup failed")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusConflict, "account_deletion_pending", "account deletion is in progress")
+		return
+	}
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "hash failed")
 		return
 	}
 
-	userID := auth.UIDForEmail(req.Username)
 	err = h.DB.QueryRow(r.Context(),
 		`INSERT INTO users (id, username, password_hash) VALUES ($1, $2, $3) RETURNING id`,
 		userID, strings.ToLower(req.Username), hash,
@@ -98,7 +107,9 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	// explicitly for an ecosystem deployment that already has user accounts.
 	var userID string
 	var err error
+	authorityVerified := false
 	if localAuthEnabled() {
+		userID = auth.UIDForEmail(req.Username)
 		var passwordHash string
 		err := h.DB.QueryRow(r.Context(),
 			`SELECT id, COALESCE(password_hash, '') FROM users WHERE username = $1`, strings.ToLower(req.Username),
@@ -127,6 +138,20 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		userID = acct.UID
+		authorityVerified = true
+	}
+
+	allowed, err := h.accountActivationAllowed(r.Context(), userID, authorityVerified)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "account state lookup failed")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusConflict, "account_deletion_pending", "account deletion is in progress")
+		return
+	}
+
+	if authorityVerified {
 		// Ensure a local user row exists for foreign keys. Password stays NULL;
 		// external credentials remain with the configured account authority.
 		_, err = h.DB.Exec(r.Context(),

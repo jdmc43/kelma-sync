@@ -6,7 +6,7 @@ export PORT
 export DATABASE_URL
 export MIGRATIONS_DIR
 
-.PHONY: db-up db-down db-logs db-reset-content run build test e2e anki-e2e fmt vet curl-register curl-login seed smoke
+.PHONY: db-up db-down db-logs db-reset-content run build test e2e fsrs-smoke anki-e2e fmt vet curl-register curl-login seed smoke
 
 db-up:
 	docker compose up -d postgres
@@ -21,7 +21,7 @@ db-logs:
 # so logins survive a reset.
 db-reset-content:
 	docker compose exec -T postgres psql -U kelma -d kelma_sync -c \
-	  "TRUNCATE reviews, study_days, notes, cards, notetypes, decks, media, tombstones RESTART IDENTITY;"
+	  "TRUNCATE scheduler_projections, study_day_policies, reviews, study_days, notes, cards, notetypes, decks, media, tombstones RESTART IDENTITY;"
 
 run:
 	go run ./cmd/server
@@ -34,6 +34,9 @@ test:
 
 e2e:
 	python3 ./scripts/e2e_v2.py
+
+fsrs-smoke:
+	bash ./scripts/run_fsrs_smoke_local.sh
 
 anki-e2e:
 	PYTHONPATH=$$HOME/projects/kelma-desktop-public/out/pylib:$$HOME/projects/kelma-desktop-public/pylib \

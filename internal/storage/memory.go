@@ -3,7 +3,9 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"strings"
 	"sync"
 )
 
@@ -33,6 +35,16 @@ func (m *Memory) Put(_ context.Context, key string, body io.Reader, _ int64, con
 	return nil
 }
 
+func (m *Memory) Stat(_ context.Context, key string) (ObjectInfo, error) {
+	m.mu.RLock()
+	obj, ok := m.data[key]
+	m.mu.RUnlock()
+	if !ok {
+		return ObjectInfo{}, ErrNotFound
+	}
+	return ObjectInfo{SizeBytes: int64(len(obj.body)), ContentType: obj.contentType}, nil
+}
+
 func (m *Memory) Get(_ context.Context, key string) (io.ReadCloser, string, error) {
 	m.mu.RLock()
 	obj, ok := m.data[key]
@@ -46,6 +58,20 @@ func (m *Memory) Get(_ context.Context, key string) (io.ReadCloser, string, erro
 func (m *Memory) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
 	delete(m.data, key)
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Memory) DeletePrefix(_ context.Context, prefix string) error {
+	if prefix == "" {
+		return errors.New("storage: refusing to delete an empty prefix")
+	}
+	m.mu.Lock()
+	for key := range m.data {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.data, key)
+		}
+	}
 	m.mu.Unlock()
 	return nil
 }

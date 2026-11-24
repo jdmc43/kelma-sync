@@ -1,5 +1,9 @@
 # KelmaSync v2 — Design Document
 
+The versioned FSRS-6 profile, local optimization, server projection, and
+failure/conflict model are specified in [FSRS_DESIGN.md](FSRS_DESIGN.md). That
+document supersedes earlier shared-scheduling assumptions in this overview.
+
 ## Core principle
 
 A note is an independent item. Sync is the process of keeping independent items
@@ -24,21 +28,43 @@ One canonical record per note, keyed by `guid`:
 
 The server also stores:
 
-- **Scheduling state** (due dates, intervals, reps, streaks) — synced per card,
-  compared by UTC source timestamp. Newly generated cards from an upstream note
-  pull inherit the upstream card instead of treating generation time as an edit.
-  Not surfaced to the user as a conflict; silent newest-wins is acceptable because
-  scheduling state is continuous and any recent version is correct enough.
+- **Scheduling projections** — derived per card from immutable review history
+  and a versioned FSRS-6 profile. The server publishes a compatibility
+  projection for legacy KelmaDesktop and Kelma Immersion; modern clients may
+  independently derive local scheduling. Projection status is stored
+  separately so failed work cannot appear unchanged.
+- **Card creation time** — one immutable nullable timestamp. New clients send
+  the exact source time, plausible positive Anki millisecond IDs backfill legacy
+  rows, and unverifiable legacy cards remain Unknown rather than receiving a
+  migration or modification date.
+- **Card study state** — `active` or `suspended` is durable synchronized user
+  intent with its own modification clock. It is independent from both card
+  content and derived scheduling, so projection jobs cannot unsuspend cards.
+- **Schedule reset** — a monotonic per-card review-id cutoff is synchronized
+  independently. Reviews remain immutable, but FSRS replay ignores facts at or
+  below the cutoff and projects the card as New until another review arrives.
+- **Manual due date** — a nullable (`0` when absent) per-card UTC due-date
+  override is synchronized with its own newest-wins clock. It does not alter
+  FSRS memory state, and a later review or reset clears it.
 - **Review history** — Anki `revlog` rows are append-only and keyed by their
   millisecond review id. `(note_guid, card_ord)` remaps collection-local card
   ids on download, preserving complete statistics and FSRS training history.
-- **Portable daily counters** — per-deck epoch-day snapshots carry Anki's
-  `new_studied`/`review_studied` quota state, which is not derivable from card
-  scheduling and otherwise causes one device to offer a second daily batch.
+  Review history, not a scheduling snapshot, is authoritative.
+- **Study-day policy** — one versioned account-level IANA timezone and local
+  rollover hour, exposed independently from collection sync so Review,
+  Immersion, and future clients classify immutable event timestamps into the
+  same DST-aware civil study day. Queue admission and ordering remain client
+  behavior; only the day-boundary policy is shared.
+- **Legacy daily counters** — accepted during migration for older clients.
+  Server reporting derives study activity from review history under the shared
+  study-day policy.
 - **Media files** — stored as blobs keyed by filename. A note's fields may
   reference media filenames; the server ensures referenced files are present.
-  Deletion is reference-counted: a file is removed only when no note references
-  it. Deduplication is out of scope for v2.
+  Initial downloads resolve up to 500 account-owned names in one authenticated
+  plan and use short-lived, scoped R2 URLs, removing one server authentication,
+  database lookup, and proxy hop per blob while clients retain bounded transfer
+  concurrency. Deletion is reference-counted: a file is removed only when no
+  note references it. Deduplication is out of scope for v2.
 - **Notetype definitions** — stored per user, synced the same way as notes:
   manifest exchange by checksum, conflict surfaced and resolved by the client
   (force local / accept server / edit and make canonical). When a notetype
@@ -181,9 +207,15 @@ read during normal sync — only for debugging and manual recovery.
 ## Deck sync
 
 Notes carry the deck **name** (stable, human-readable, e.g. `Japanese::Vocab`).
-Deck config (new cards/day, review limits, scheduler settings) syncs separately
-as a flat key-value record per deck name, using the same manifest/checksum/
-conflict flow as notes and notetypes. No deck ids to reconcile across clients.
+Deck metadata and opaque legacy config sync separately as a flat key-value
+record per deck name, using the same manifest/checksum/conflict flow as notes
+and notetypes. Deck New/day and Reviews/day limits synchronize in the deck configuration as
+`newLimit` and `reviewLimit`; other device-local deck study Options do not become
+shared scheduling truth. The account study-day timezone and rollover hour are
+also shared because all clients need one civil-day identity for limits,
+statistics, and streaks.
+The account server FSRS profile has the separate ownership and conflict model in
+[FSRS_DESIGN.md](FSRS_DESIGN.md). No deck ids are required for reconciliation.
 
 ## Tombstone cleanup
 

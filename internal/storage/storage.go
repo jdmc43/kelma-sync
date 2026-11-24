@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 
+	smithyhttp "github.com/aws/smithy-go/transport/http"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -16,13 +18,24 @@ import (
 )
 
 // Storage is the blob store interface used by media handlers.
+type ObjectInfo struct {
+	SizeBytes   int64
+	ContentType string
+}
+
 type Storage interface {
 	// Put stores an object and returns its storage key.
 	Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error
+	// Stat verifies an object without downloading its body.
+	Stat(ctx context.Context, key string) (ObjectInfo, error)
 	// Get retrieves an object as a stream. Caller must close it.
 	Get(ctx context.Context, key string) (io.ReadCloser, string, error)
 	// Delete removes an object. Deleting a missing object is not an error.
 	Delete(ctx context.Context, key string) error
+	// DeletePrefix removes every object whose key starts with prefix. It is used
+	// for complete account erasure and must also remove orphaned objects that no
+	// longer have database metadata.
+	DeletePrefix(ctx context.Context, prefix string) error
 }
 
 // R2 implements Storage against Cloudflare R2 (S3-compatible).
@@ -35,6 +48,12 @@ type R2 struct {
 //
 //	R2_ACCOUNT_ID, R2_ACCESS_KEY, R2_SECRET_KEY, R2_BUCKET
 func NewR2(ctx context.Context) (*R2, error) {
+	return NewR2WithHTTPClient(ctx, nil)
+}
+
+// NewR2WithHTTPClient pins every SDK request to an explicitly reviewed client.
+// The sandbox uses this instead of relying on process-global transport defaults.
+func NewR2WithHTTPClient(_ context.Context, httpClient s3.HTTPClient) (*R2, error) {
 	accountID := os.Getenv("R2_ACCOUNT_ID")
 	accessKey := os.Getenv("R2_ACCESS_KEY")
 	secretKey := os.Getenv("R2_SECRET_KEY")
@@ -48,6 +67,7 @@ func NewR2(ctx context.Context) (*R2, error) {
 		Region:       "auto",
 		BaseEndpoint: aws.String(endpoint),
 		Credentials:  credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+		HTTPClient:   httpClient,
 	})
 	return &R2{client: client, bucket: bucket}, nil
 }
@@ -61,6 +81,28 @@ func (r *R2) Put(ctx context.Context, key string, body io.Reader, size int64, co
 		ContentType:   aws.String(contentType),
 	})
 	return err
+}
+
+func (r *R2) Stat(ctx context.Context, key string) (ObjectInfo, error) {
+	out, err := r.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(r.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var responseError *smithyhttp.ResponseError
+		if errors.As(err, &responseError) && responseError.HTTPStatusCode() == 404 {
+			return ObjectInfo{}, ErrNotFound
+		}
+		return ObjectInfo{}, err
+	}
+	info := ObjectInfo{}
+	if out.ContentLength != nil {
+		info.SizeBytes = *out.ContentLength
+	}
+	if out.ContentType != nil {
+		info.ContentType = *out.ContentType
+	}
+	return info, nil
 }
 
 func (r *R2) Get(ctx context.Context, key string) (io.ReadCloser, string, error) {
@@ -91,4 +133,41 @@ func (r *R2) Delete(ctx context.Context, key string) error {
 		Key:    aws.String(key),
 	})
 	return err
+}
+
+func (r *R2) DeletePrefix(ctx context.Context, prefix string) error {
+	if prefix == "" {
+		return errors.New("storage: refusing to delete an empty prefix")
+	}
+	for {
+		listed, err := r.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket: aws.String(r.bucket),
+			Prefix: aws.String(prefix),
+		})
+		if err != nil {
+			return err
+		}
+		if len(listed.Contents) == 0 {
+			return nil
+		}
+		objects := make([]types.ObjectIdentifier, 0, len(listed.Contents))
+		for _, object := range listed.Contents {
+			if object.Key != nil {
+				objects = append(objects, types.ObjectIdentifier{Key: object.Key})
+			}
+		}
+		if len(objects) == 0 {
+			return errors.New("storage: R2 returned objects without keys")
+		}
+		deleted, err := r.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(r.bucket),
+			Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			return err
+		}
+		if len(deleted.Errors) > 0 {
+			return fmt.Errorf("storage: R2 failed to delete %d objects", len(deleted.Errors))
+		}
+	}
 }

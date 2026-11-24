@@ -19,6 +19,22 @@ func TestUTCWriteTimesNormalizesOffsets(t *testing.T) {
 	}
 }
 
+func TestResolvedCardCreatedAtUsesExplicitTimeThenPlausibleAnkiID(t *testing.T) {
+	now := time.Date(2026, 7, 14, 22, 0, 0, 0, time.UTC)
+	explicit := time.Date(2019, 3, 4, 5, 6, 7, 0, time.FixedZone("offset", 2*60*60))
+
+	if got := resolvedCardCreatedAt(-1, &explicit, now); got == nil || !got.Equal(explicit) || got.Location() != time.UTC {
+		t.Fatalf("explicit creation time = %v", got)
+	}
+	ankiMillis := time.Date(2020, 1, 2, 3, 4, 5, 123000000, time.UTC).UnixMilli()
+	if got := resolvedCardCreatedAt(ankiMillis, nil, now); got == nil || got.UnixMilli() != ankiMillis {
+		t.Fatalf("inferred Anki creation time = %v", got)
+	}
+	if got := resolvedCardCreatedAt(-1, nil, now); got != nil {
+		t.Fatalf("negative legacy card received fabricated creation time %v", got)
+	}
+}
+
 func TestUTCWriteTimesClampsFutureAndMissingClientClocks(t *testing.T) {
 	now := time.Date(2026, 7, 14, 22, 0, 0, 0, time.UTC)
 
