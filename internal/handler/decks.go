@@ -19,7 +19,7 @@ func (h *Handler) GetDeck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
@@ -48,7 +48,7 @@ func (h *Handler) PutDeck(w http.ResponseWriter, r *http.Request) {
 	existing, err := h.loadDeck(r, claims.UserID, name)
 	notFound := errors.Is(err, pgx.ErrNoRows)
 	if err != nil && !notFound {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	if !notFound && !forceOverride(r) && existing.Checksum != req.BaseChecksum {
@@ -64,7 +64,7 @@ func (h *Handler) PutDeck(w http.ResponseWriter, r *http.Request) {
 
 	saved, err := h.upsertDeck(r.Context(), claims.UserID, claims.ClientID, name, req, newChecksum, time.Now().UTC())
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, saved)
@@ -77,11 +77,11 @@ func (h *Handler) DeleteDeck(w http.ResponseWriter, r *http.Request) {
 	_, err := h.DB.Exec(r.Context(),
 		`DELETE FROM decks WHERE user_id = $1 AND name = $2`, claims.UserID, name)
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	if err := h.writeTombstone(r, claims.UserID, "deck", name, claims.ClientID); err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -24,7 +24,7 @@ func (h *Handler) GetNotetype(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, nt)
@@ -55,7 +55,7 @@ func (h *Handler) PutNotetype(w http.ResponseWriter, r *http.Request) {
 	existing, err := h.loadNotetype(r, claims.UserID, id)
 	notFound := errors.Is(err, pgx.ErrNoRows)
 	if err != nil && !notFound {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	if !notFound && !forceOverride(r) && existing.Checksum != req.BaseChecksum {
@@ -71,7 +71,7 @@ func (h *Handler) PutNotetype(w http.ResponseWriter, r *http.Request) {
 
 	saved, err := h.upsertNotetype(r.Context(), claims.UserID, claims.ClientID, id, req, newChecksum, time.Now().UTC())
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, saved)
@@ -89,11 +89,11 @@ func (h *Handler) DeleteNotetype(w http.ResponseWriter, r *http.Request) {
 	_, err = h.DB.Exec(r.Context(),
 		`DELETE FROM notetypes WHERE user_id = $1 AND notetype_id = $2`, claims.UserID, id)
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	if err := h.writeTombstone(r, claims.UserID, "notetype", idStr, claims.ClientID); err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

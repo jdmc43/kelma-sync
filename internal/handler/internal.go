@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"crypto/subtle"
 	"net/http"
 	"os"
 	"strings"
@@ -27,8 +26,7 @@ func requireInternal(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "not_found", "internal API is not enabled")
 			return
 		}
-		provided := r.Header.Get("x-internal-secret")
-		if len(provided) != len(secret) || subtle.ConstantTimeCompare([]byte(provided), []byte(secret)) != 1 {
+		if r.Header.Get("x-internal-secret") != secret {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "bad internal secret")
 			return
 		}
@@ -63,6 +61,15 @@ func (h *Handler) InternalToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := auth.UIDForEmail(email)
+	allowed, err := h.accountActivationAllowed(r.Context(), userID, true)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "account state lookup failed")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusConflict, "account_deletion_pending", "account deletion is in progress")
+		return
+	}
 	if _, err := h.DB.Exec(r.Context(),
 		`INSERT INTO users (id, username, password_hash) VALUES ($1, $2, NULL)
 		 ON CONFLICT (id) DO UPDATE SET username = EXCLUDED.username`,

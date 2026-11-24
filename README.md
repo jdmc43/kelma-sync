@@ -10,7 +10,9 @@ without depending on a private hosted backend.
 
 The server uses an item-oriented v2 protocol: clients exchange manifests and
 transfer only changed notes, cards, complete review history, daily study counters,
-decks, notetypes, tombstones, and media. It
+decks, notetypes, tombstones, and media. It speaks the same protocol as Kelma's
+hosted service, so Kelma Review and the Kelma add-on for Anki can sync with your
+own server (see [Connecting clients](#connecting-clients)). It
 is written in Go, stores structured data in PostgreSQL, and stores media either
 on the local filesystem or in Cloudflare R2 through its S3-compatible API.
 Reference Python clients and the canonical Rust checksum helper are included.
@@ -170,11 +172,39 @@ than relying on an opaque production service.
 - Incremental manifest-based sync
 - Explicit conflicts for note, deck, and notetype content
 - Newest-wins scheduling synchronization
+- Server-side FSRS-6 scheduling: an account scheduler profile (parameters,
+  desired retention, learning steps) and per-card projections computed from the
+  full review history by a background worker (see [FSRS_DESIGN.md](FSRS_DESIGN.md))
+- Account study days: time zone and day-start hour shared by every client
+- Card study state (suspended), schedule resets, and manual due dates
+- Append-only review history with retractions (undo), card flags, and note marks
+- Bounded `.apkg` import into an account
 - Persistent tombstones for deletions
-- Batched push, pull, and delete operations
+- Batched push, pull, and delete operations, with large media restores served
+  as prepared TAR archives
 - Local filesystem or Cloudflare R2 media storage
-- Local accounts for self-hosting or an optional external account authority
+- Local accounts for self-hosting or an optional external account authority,
+  plus an internal account-deletion API (see [ACCOUNT_DELETION.md](ACCOUNT_DELETION.md))
 - Bearer tokens stored as hashes, not plaintext
+
+## Connecting clients
+
+Accounts belong to one server, and both Kelma clients let each profile choose
+its own:
+
+- **[Kelma Review](https://github.com/jdmc43/kelma-review)** (iPhone, Android,
+  macOS, Windows, Linux): when signing in, choose **Change** next to *Sync
+  server* and enter your server's address. Each saved account keeps its server,
+  so a Kelma account and an account on your server can live side by side.
+- **[Kelma add-on for Anki](https://github.com/jdmc43/kelma-anki-plugin)**: in a
+  Kelma profile, open **Sync → Sync server…**, choose *Another KelmaSync
+  server*, enter the address and click **Check**. Every Anki profile has its own
+  server and sign-in.
+
+Clients check `GET /health` before switching. Create accounts however suits
+your deployment, for example with `POST /v2/auth/register` in local mode; the
+clients only sign in. Serve the API over HTTPS: phones may refuse plain HTTP,
+and passwords would otherwise travel unencrypted.
 
 ## Repository layout
 
@@ -182,12 +212,17 @@ than relying on an opaque production service.
 |---|---|
 | `cmd/server` | Go server entry point |
 | `internal` | Authentication, API handlers, database, and media storage |
-| `migrations` | PostgreSQL schema migrations |
+| `internal/fsrs`, `internal/projection` | FSRS-6 scheduler and the projection worker |
+| `internal/studyday`, `internal/ankiimport` | Study-day policy and `.apkg` import |
+| `migrations` | PostgreSQL schema migrations (applied at startup) |
+| `tools/fsrs_oracle` | Development-only FSRS parity fixtures (not linked into the server) |
 | `clients/python` | Reference Python/Anki client implementation |
 | `clients/rust/kelma-hash` | Canonical cross-language checksum implementation |
 | `API.md` | HTTP API reference |
 | `DESIGN.md` | Protocol and conflict model |
 | `SCHEMA.md` | Database model |
+| `FSRS_DESIGN.md` | Server scheduling design |
+| `ACCOUNT_DELETION.md` | Account deletion workflow |
 
 ## Quick start with Docker
 
@@ -253,6 +288,14 @@ PostgreSQL directly to the internet.
 The template binds the API to localhost by default. Place Caddy, nginx,
 Traefik, or another TLS reverse proxy in front of it. For multi-host or
 high-availability deployments, manage PostgreSQL and object storage separately.
+
+### Upgrading
+
+Migrations run automatically when the server starts and only ever add to the
+schema. Servers created from earlier releases (migrations 001–004) upgrade in
+place to the current schema (through 028); existing collections are kept and
+the FSRS projection worker backfills scheduling for existing review history in
+the background. Back up PostgreSQL before upgrading.
 
 ## Security
 

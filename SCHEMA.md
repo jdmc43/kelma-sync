@@ -75,6 +75,22 @@ CREATE TABLE decks (
 
 ---
 
+### Deck limit history
+
+```sql
+-- One row per change of a deck's daily limits (config newLimit / reviewLimit),
+-- with the limits in effect before it; written by the trigger decks_limit_history
+-- (any client's write, renames carried over). Review days score each past day
+-- with the limits it had, so raising a limit doesn't rewrite earlier days.
+CREATE TABLE deck_limit_history (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     TEXT        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    deck_name   TEXT        NOT NULL,
+    limits      JSONB       NOT NULL,   -- {"newLimit": …, "reviewLimit": …} before the change
+    changed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
 ## Notes
 
 ```sql
@@ -108,12 +124,44 @@ CREATE TABLE cards (
     ord         INT NOT NULL,      -- template index within the notetype
     -- scheduling state as JSON: due, interval, factor, reps, lapses, type, queue
     scheduling  JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ,
+    study_state TEXT NOT NULL DEFAULT 'active'
+        CHECK (study_state IN ('active', 'suspended')),
+    study_state_modified_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    study_state_client_modified_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    study_state_client_id UUID REFERENCES clients(id),
+    schedule_reset_through_review_id BIGINT NOT NULL DEFAULT 0,
+    schedule_reset_modified_at TIMESTAMPTZ NOT NULL
+        DEFAULT '1970-01-01T00:00:00Z',
+    schedule_reset_client_modified_at TIMESTAMPTZ NOT NULL
+        DEFAULT '1970-01-01T00:00:00Z',
+    schedule_reset_client_id UUID REFERENCES clients(id),
+    due_date_override_ms BIGINT NOT NULL DEFAULT 0
+        CHECK (due_date_override_ms >= 0 AND due_date_override_ms % 86400000 = 0),
+    due_date_override_modified_at TIMESTAMPTZ NOT NULL
+        DEFAULT '1970-01-01T00:00:00Z',
+    due_date_override_client_modified_at TIMESTAMPTZ NOT NULL
+        DEFAULT '1970-01-01T00:00:00Z',
+    due_date_override_client_id UUID REFERENCES clients(id),
     modified_at TIMESTAMPTZ NOT NULL,
     client_modified_at TIMESTAMPTZ NOT NULL,
     last_client_id UUID REFERENCES clients(id),
-    UNIQUE (user_id, card_id)
+    UNIQUE (user_id, note_guid, ord)
 );
 ```
+
+`created_at` is the immutable original card-creation time. It is nullable so
+legacy cards without trustworthy source metadata remain Unknown; migration 010
+backfills plausible positive Anki millisecond IDs without fabricating dates for
+negative or arbitrary IDs.
+
+`study_state` is durable synchronized user intent. Its independent timestamps
+prevent server FSRS projection writes to `scheduling` from overwriting or
+reordering suspension changes. `schedule_reset_through_review_id` is a monotonic,
+independently synchronized projection cutoff: history remains stored, while
+FSRS replay starts after the cutoff. `due_date_override_ms` is independently
+synchronized user intent (`0` means no override). It changes only queue timing,
+not FSRS memory state, and a later review or schedule reset automatically clears it.
 
 ---
 
@@ -144,6 +192,51 @@ CREATE TABLE reviews (
 Review rows are append-only, like native Anki sync. `source_card_id` is retained
 as a fallback, but clients map history through `(note_guid, card_ord)` because
 card ids differ between collections.
+
+## FSRS-6 profiles and projections
+
+`scheduler_profiles` stores immutable, account-wide profile versions uploaded
+through explicit user action. Version `0` is the implicit pinned default and is
+not stored. Each row records the complete 21-parameter configuration, ownership
+sources, optimizer provenance when applicable, and a configuration hash.
+
+`scheduler_projections` is keyed by `(user_id, note_guid, card_ord)`. It stores
+separate desired and applied history/profile identities plus durable job state:
+
+```text
+desired_history_hash / desired_through_review_id / desired_profile_version
+applied_history_hash / applied_through_review_id / applied_profile_version
+status / job_id / attempt_count / last_error_code / retry timestamps
+```
+
+Accepting a new rating review atomically updates desired identity and marks the
+projection pending. The in-process Go worker publishes `cards.scheduling` and
+advances applied identity in one transaction. Failed jobs preserve the previous
+scheduling JSON while remaining explicitly stale.
+
+See `migrations/005_fsrs_projections.sql` for the complete constraints and
+indexes and `FSRS_DESIGN.md` for ownership and replay semantics.
+
+## Study-day policy
+
+```sql
+CREATE TABLE study_day_policies (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    version         BIGINT NOT NULL CHECK (version > 0),
+    timezone_id     TEXT NOT NULL,
+    day_start_hour  SMALLINT NOT NULL CHECK (day_start_hour BETWEEN 0 AND 23),
+    idempotency_key TEXT NOT NULL,
+    modified_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_client_id  UUID REFERENCES clients(id),
+    PRIMARY KEY (user_id, version),
+    UNIQUE (user_id, idempotency_key)
+);
+```
+
+Versions are append-only. The highest version is the active account-wide
+DST-aware civil-day policy. An absent row has the implicit UTC/04:00 version-0
+default so old accounts remain readable until a timezone-aware client publishes
+the user's system timezone.
 
 ## Daily study counters
 
@@ -230,15 +323,14 @@ CREATE INDEX idx_media_filename   ON media  (user_id, filename);
 ## Notes on design choices
 
 - **JSONB for fields and scheduling** — note fields are an ordered array whose
-  length and meaning are defined by the notetype. Scheduling is a bag of
-  Anki-specific integers that may grow over time. Both are opaque to the server
-  beyond storage and retrieval; JSONB avoids a schema migration every time Anki
-  adds a scheduler field.
+  length and meaning are defined by the notetype. Card scheduling remains JSONB
+  for Anki compatibility, but a successfully managed payload is a derived
+  server FSRS-6 projection rather than opaque shared truth.
 - **`modified_at` vs `client_modified_at`** — `modified_at` is the server
   timestamp of the last accepted write (used for manifest filtering).
-  `client_modified_at` is what the client reported; used for per-card scheduling
-  conflict resolution (newest client timestamp wins) and displayed in the
-  conflict UI.
+  `client_modified_at` is what the client reported and remains relevant for
+  card content reconciliation. It cannot overwrite a managed server FSRS-6
+  scheduling projection.
 - **`notetype_id` as BIGINT not UUID** — Anki assigns notetype ids as
   millisecond timestamps locally. Storing the original id avoids a mapping layer
   on the client.

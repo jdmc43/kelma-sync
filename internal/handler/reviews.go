@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jdmc43/kelma-sync/internal/model"
+	"github.com/jdmc43/kelma-sync/internal/projection"
 )
 
 // putReviewRequest is an immutable Anki revlog row. ReviewID is Anki's
@@ -83,7 +84,16 @@ func (h *Handler) insertReviews(
 	if err != nil {
 		return nil, err
 	}
-	_, err = h.DB.Exec(ctx,
+	tx, err := h.DB.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if err := projection.LockAccountTx(ctx, tx, userID); err != nil {
+		return nil, err
+	}
+
+	insertedRows, err := tx.Query(ctx,
 		`INSERT INTO reviews (
 		     user_id, review_id, source_card_id, note_guid, card_ord, deck_name,
 		     ease, interval, last_interval, factor, taken_millis, review_kind,
@@ -100,15 +110,53 @@ func (h *Handler) insertReviews(
 		     last_interval int, factor int, taken_millis int,
 		     review_kind int, checksum text
 		 )
-		 ON CONFLICT (user_id, review_id) DO NOTHING`,
+		 ON CONFLICT (user_id, review_id) DO NOTHING
+		 RETURNING note_guid,card_ord,ease,review_id`,
 		userID, payload, now.UTC(), clientID,
 	)
 	if err != nil {
 		return nil, err
 	}
+	affected := []projection.LogicalCard{}
+	dueClears := map[projection.LogicalCard]int64{}
+	for insertedRows.Next() {
+		var card projection.LogicalCard
+		var ease int
+		var reviewID int64
+		if err := insertedRows.Scan(&card.NoteGUID, &card.CardOrd, &ease, &reviewID); err != nil {
+			insertedRows.Close()
+			return nil, err
+		}
+		if card.NoteGUID != "" && ease >= 1 && ease <= 4 {
+			affected = append(affected, card)
+			if reviewID > dueClears[card] {
+				dueClears[card] = reviewID
+			}
+		}
+	}
+	insertedRows.Close()
+	if err := insertedRows.Err(); err != nil {
+		return nil, err
+	}
+	if err := projection.EnqueueReviewsTx(ctx, tx, userID, affected); err != nil {
+		return nil, err
+	}
+	for card, reviewID := range dueClears {
+		_, clientModifiedAt := utcWriteTimes(now, time.UnixMilli(reviewID))
+		if _, err := tx.Exec(ctx,
+			`UPDATE cards SET due_date_override_ms=0,due_date_override_modified_at=$1,
+			                  due_date_override_client_modified_at=$2,due_date_override_client_id=$3
+			 WHERE user_id=$4 AND note_guid=$5 AND ord=$6 AND due_date_override_ms>0
+			   AND (due_date_override_client_modified_at,COALESCE(due_date_override_client_id,
+			       '00000000-0000-0000-0000-000000000000'::uuid)) < ($2,$3::uuid)`,
+			now.UTC(), clientModifiedAt, clientID, userID, card.NoteGUID, card.CardOrd,
+		); err != nil {
+			return nil, err
+		}
+	}
 
 	stored := map[int64]string{}
-	queryRows, err := h.DB.Query(ctx,
+	queryRows, err := tx.Query(ctx,
 		`SELECT review_id, checksum FROM reviews
 		 WHERE user_id=$1 AND review_id=ANY($2::bigint[])`,
 		userID, ids,
@@ -127,6 +175,9 @@ func (h *Handler) insertReviews(
 	}
 	queryRows.Close()
 	if err := queryRows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 

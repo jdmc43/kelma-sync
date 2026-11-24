@@ -55,6 +55,29 @@ func TestChecksumParityWithRust(t *testing.T) {
 	}
 }
 
+func TestNotetypeChecksumTreatsMissingModernDefaultsAsEquivalent(t *testing.T) {
+	legacy := map[string]any{
+		"flds":  []any{map[string]any{"name": "Front", "ord": 0}},
+		"tmpls": []any{map[string]any{"name": "Card 1", "ord": 0, "qfmt": "{{Front}}"}},
+	}
+	modern := map[string]any{
+		"flds": []any{map[string]any{
+			"name": "Front", "ord": 0, "collapsed": false, "description": "",
+			"excludeFromSearch": false, "font": "Arial", "plainText": false,
+			"preventDeletion": false, "rtl": false, "size": 20,
+			"sticky": false, "tag": nil,
+		}},
+		"tmpls": []any{map[string]any{
+			"name": "Card 1", "ord": 0, "qfmt": "{{Front}}", "afmt": "",
+			"bafmt": "", "bfont": "", "bqfmt": "", "bsize": 0, "did": nil,
+		}},
+	}
+
+	if got, want := notetypeChecksum("Legacy", legacy), notetypeChecksum("Legacy", modern); got != want {
+		t.Fatalf("legacy checksum %s != modern checksum %s", got, want)
+	}
+}
+
 func rustHashBinary(t *testing.T) string {
 	t.Helper()
 	name := "kelma-hash-" + runtime.GOOS + "-"

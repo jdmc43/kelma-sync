@@ -90,6 +90,22 @@ func normalizeNotetypeDefinition(def map[string]any) map[string]any {
 							}
 							cleaned[mk] = mv
 						}
+						defaults := map[string]any{
+							"afmt": "", "bafmt": "", "bfont": "", "bqfmt": "",
+							"bsize": 0, "did": nil, "qfmt": "",
+						}
+						if k == "flds" {
+							defaults = map[string]any{
+								"collapsed": false, "description": "", "excludeFromSearch": false,
+								"font": "Arial", "plainText": false, "preventDeletion": false,
+								"rtl": false, "size": 20, "sticky": false, "tag": nil,
+							}
+						}
+						for dk, dv := range defaults {
+							if _, exists := cleaned[dk]; !exists {
+								cleaned[dk] = dv
+							}
+						}
 						newArr[i] = cleaned
 					} else {
 						newArr[i] = item

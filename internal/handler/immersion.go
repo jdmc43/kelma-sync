@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jdmc43/kelma-sync/internal/projection"
 )
 
 const (
@@ -36,6 +37,7 @@ type immersionCard struct {
 	CardID     int64          `json:"card_id"`
 	Ord        int            `json:"ord"`
 	Scheduling map[string]any `json:"scheduling"`
+	CreatedAt  *time.Time     `json:"created_at,omitempty"`
 }
 
 type immersionMediaFile struct {
@@ -103,7 +105,7 @@ func (h *Handler) PostImmersionCard(w http.ResponseWriter, r *http.Request) {
 		if err := h.DB.QueryRow(r.Context(),
 			`SELECT EXISTS(SELECT 1 FROM decks WHERE user_id=$1 AND name=$2)`,
 			claims.UserID, req.DeckName).Scan(&exists); err != nil {
-			writeInternalError(w, err)
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
 		if !exists {
@@ -118,16 +120,20 @@ func (h *Handler) PostImmersionCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.storeImmersionMedia(r, media); err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "storage_write_failed", err.Error())
 		return
 	}
 
 	tx, err := h.DB.Begin(r.Context())
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	defer tx.Rollback(r.Context()) //nolint:errcheck
+	if err := projection.LockAccountTx(r.Context(), tx, claims.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
 	now, normalizedClientTime := utcWriteTimes(time.Now(), req.ClientModifiedAt)
 	req.ClientModifiedAt = normalizedClientTime
 
@@ -139,7 +145,7 @@ func (h *Handler) PostImmersionCard(w http.ResponseWriter, r *http.Request) {
 			claims.UserID, req.DeckName, req.DeckConfig, deckChecksum(req.DeckConfig), now,
 			req.ClientModifiedAt, claims.ClientID)
 		if err != nil {
-			writeInternalError(w, err)
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
 	}
@@ -159,7 +165,7 @@ func (h *Handler) PostImmersionCard(w http.ResponseWriter, r *http.Request) {
 			req.ClientModifiedAt, claims.ClientID)
 	}
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 
@@ -170,38 +176,47 @@ func (h *Handler) PostImmersionCard(w http.ResponseWriter, r *http.Request) {
 		claims.UserID, req.Note.GUID, modelID, req.Note.Fields, req.Note.Tags,
 		checksum(req.Note.Fields, req.Note.Tags), now, req.ClientModifiedAt, claims.ClientID)
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 
 	canonicalCardID := req.Card.CardID
+	createdAt := resolvedCardCreatedAt(req.Card.CardID, req.Card.CreatedAt, now)
 	err = tx.QueryRow(r.Context(),
-		`INSERT INTO cards (user_id,card_id,note_guid,deck_name,ord,scheduling,modified_at,client_modified_at,last_client_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		 ON CONFLICT (user_id,note_guid,ord) WHERE note_guid <> '' DO NOTHING
+		`INSERT INTO cards (user_id,card_id,note_guid,deck_name,ord,scheduling,created_at,
+		                    modified_at,client_modified_at,last_client_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		 ON CONFLICT (user_id,note_guid,ord) WHERE note_guid <> '' DO UPDATE SET
+		   created_at=COALESCE(cards.created_at, EXCLUDED.created_at)
 		 RETURNING card_id`,
 		claims.UserID, req.Card.CardID, req.Note.GUID, req.DeckName, req.Card.Ord,
-		req.Card.Scheduling, now, req.ClientModifiedAt, claims.ClientID).Scan(&canonicalCardID)
+		req.Card.Scheduling, createdAt, now, req.ClientModifiedAt, claims.ClientID).Scan(&canonicalCardID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(r.Context(),
 			`SELECT card_id FROM cards WHERE user_id=$1 AND note_guid=$2 AND ord=$3`,
 			claims.UserID, req.Note.GUID, req.Card.Ord).Scan(&canonicalCardID)
 	}
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if err := projection.EnqueueCardTx(
+		r.Context(), tx, claims.UserID, req.Note.GUID, req.Card.Ord,
+	); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 
 	for _, file := range media {
 		_, err = tx.Exec(r.Context(),
-			`INSERT INTO media (user_id,filename,size_bytes,storage_key,modified_at)
-			 VALUES ($1,$2,$3,$4,$5)
+			`INSERT INTO media (user_id,filename,size_bytes,storage_key,modified_at,last_client_id)
+			 VALUES ($1,$2,$3,$4,$5,$6)
 			 ON CONFLICT (user_id,filename) DO UPDATE SET
 			   size_bytes=EXCLUDED.size_bytes, storage_key=EXCLUDED.storage_key,
-			   modified_at=EXCLUDED.modified_at`,
-			claims.UserID, file.filename, len(file.data), file.storageKey, now)
+			   modified_at=EXCLUDED.modified_at,last_client_id=EXCLUDED.last_client_id`,
+			claims.UserID, file.filename, len(file.data), file.storageKey, now, claims.ClientID)
 		if err != nil {
-			writeInternalError(w, err)
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
 	}
@@ -216,11 +231,11 @@ func (h *Handler) PostImmersionCard(w http.ResponseWriter, r *http.Request) {
 		 )`, claims.UserID, req.DeckName, int64ToStr(modelID), req.Note.GUID,
 		int64ToStr(canonicalCardID), immersionMediaNames(media))
 	if err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		writeInternalError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 

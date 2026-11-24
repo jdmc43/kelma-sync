@@ -72,6 +72,25 @@ func (f *FS) Put(_ context.Context, key string, body io.Reader, _ int64, content
 	return os.Rename(tmp, p)
 }
 
+func (f *FS) Stat(_ context.Context, key string) (ObjectInfo, error) {
+	p, err := f.path(key)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	value, err := os.Stat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return ObjectInfo{}, ErrNotFound
+	}
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	contentType := ""
+	if body, err := os.ReadFile(p + ".ct"); err == nil {
+		contentType = string(body)
+	}
+	return ObjectInfo{SizeBytes: value.Size(), ContentType: contentType}, nil
+}
+
 func (f *FS) Get(_ context.Context, key string) (io.ReadCloser, string, error) {
 	p, err := f.path(key)
 	if err != nil {
@@ -101,4 +120,18 @@ func (f *FS) Delete(_ context.Context, key string) error {
 		return err
 	}
 	return nil
+}
+
+func (f *FS) DeletePrefix(_ context.Context, prefix string) error {
+	if strings.TrimSpace(prefix) == "" {
+		return errors.New("storage: refusing to delete an empty prefix")
+	}
+	p, err := f.path(strings.TrimSuffix(prefix, "/"))
+	if err != nil {
+		return err
+	}
+	if p == f.root {
+		return errors.New("storage: refusing to delete the storage root")
+	}
+	return os.RemoveAll(p)
 }
