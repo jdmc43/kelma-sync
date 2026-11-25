@@ -400,6 +400,52 @@ func TestProjectionFailureIsVisibleAndCardCreationRetriesIt(t *testing.T) {
 	}
 }
 
+func TestReviewOfADeletedNoteIsSetAsideNotFailed(t *testing.T) {
+	h, mux, pool := testServer(t)
+	defer pool.Close()
+	token := loginDemo(t, mux, "Kotlin")
+
+	// A device reviewed a card of a note it created, then the note was deleted
+	// before its card ever reached the server (production, 2026-11-25).
+	pushReviews(t, mux, token, []map[string]any{
+		projectionReview(1735689600000, "deleted-note", 3),
+	})
+	var userID string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT user_id FROM scheduler_projections WHERE note_guid='deleted-note'`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO tombstones(user_id,type,resource_id,deleted_at) VALUES($1,'note','deleted-note',now())`,
+		userID); err != nil {
+		t.Fatal(err)
+	}
+	processed, err := projection.NewWorker(h.DB).ProcessNext(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("process deleted card: processed=%v error=%v", processed, err)
+	}
+	var status, code string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT status,COALESCE(last_error_code,'') FROM scheduler_projections
+		 WHERE note_guid='deleted-note' AND card_ord=0`).Scan(&status, &code); err != nil {
+		t.Fatal(err)
+	}
+	if status != "superseded" || code != "card_deleted" {
+		t.Fatalf("deleted card state = %q/%q", status, code)
+	}
+
+	t.Setenv("KELMA_INTERNAL_SECRET", "projection-health-test")
+	request := httptest.NewRequest(http.MethodGet, "/v2/internal/projections", nil)
+	request.Header.Set("x-internal-secret", "projection-health-test")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	var health projectionHealthResponse
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &health) != nil ||
+		health.Failed != 0 || health.Stale != 0 || health.RetryExhausted != 0 {
+		t.Fatalf("health after a deleted card: code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestProfileChangeRequeuesSuccessfulProjection(t *testing.T) {
 	h, mux, pool := testServer(t)
 	defer pool.Close()

@@ -84,9 +84,9 @@ func (h *Handler) projectionSummary(r *http.Request, userID string) (projectionS
 		   COUNT(*) FILTER (WHERE status='succeeded'),
 		   COUNT(*) FILTER (WHERE status='failed'),
 		   COUNT(*) FILTER (WHERE status='superseded'),
-		   COUNT(*) FILTER (WHERE applied_history_hash IS DISTINCT FROM desired_history_hash
+		   COUNT(*) FILTER (WHERE status<>'superseded' AND (applied_history_hash IS DISTINCT FROM desired_history_hash
 		                     OR applied_through_review_id IS DISTINCT FROM desired_through_review_id
-		                     OR applied_profile_version IS DISTINCT FROM desired_profile_version)
+		                     OR applied_profile_version IS DISTINCT FROM desired_profile_version))
 		 FROM scheduler_projections WHERE user_id=$1`, userID,
 	).Scan(
 		&summary.Pending, &summary.Running, &summary.Succeeded,

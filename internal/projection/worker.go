@@ -96,6 +96,21 @@ func (worker *Worker) ProcessNext(ctx context.Context) (bool, error) {
 	}
 	if err := worker.project(ctx, claimed); err != nil {
 		code := projectionErrorCode(err)
+		if code == "missing_card" {
+			// A review can arrive before its card, so a missing card is normally
+			// retried. If the card or its note was deleted, it never will arrive:
+			// set the job aside instead of failing it. Recreating the card
+			// re-enqueues the job (EnqueueCardTx), so nothing is lost.
+			deleted, checkErr := worker.cardDeleted(ctx, claimed)
+			if checkErr == nil && deleted {
+				if markErr := worker.markDeleted(ctx, claimed); markErr != nil {
+					return true, fmt.Errorf("project %s/%d: card deleted; mark superseded: %w", claimed.NoteGUID, claimed.CardOrd, markErr)
+				}
+				log.Printf("FSRS projection set aside user=%s card=%s/%d job=%s: card was deleted",
+					claimed.UserID, claimed.NoteGUID, claimed.CardOrd, claimed.JobID)
+				return true, nil
+			}
+		}
 		if markErr := worker.markFailed(ctx, claimed, code); markErr != nil {
 			return true, fmt.Errorf("project %s/%d: %v; mark failed: %w", claimed.NoteGUID, claimed.CardOrd, err, markErr)
 		}
@@ -302,6 +317,30 @@ func (worker *Worker) markFailed(ctx context.Context, claimed job, code string) 
 		 WHERE user_id=$3 AND note_guid=$4 AND card_ord=$5
 		   AND job_id=$6::uuid AND status='running'`,
 		code, delay.Seconds(), claimed.UserID, claimed.NoteGUID, claimed.CardOrd, claimed.JobID,
+	)
+	return err
+}
+
+// cardDeleted reports whether a missing card was deleted (its note or the card
+// itself has a tombstone) rather than not uploaded yet.
+func (worker *Worker) cardDeleted(ctx context.Context, claimed job) (bool, error) {
+	var deleted bool
+	err := worker.DB.QueryRow(ctx,
+		`SELECT NOT EXISTS (SELECT 1 FROM cards WHERE user_id=$1 AND note_guid=$2 AND ord=$3)
+		   AND (EXISTS (SELECT 1 FROM tombstones WHERE user_id=$1 AND type='note' AND resource_id=$2)
+		        OR EXISTS (SELECT 1 FROM tombstones WHERE user_id=$1 AND type='card'
+		                   AND note_guid=$2 AND card_ord=$3))`,
+		claimed.UserID, claimed.NoteGUID, claimed.CardOrd,
+	).Scan(&deleted)
+	return deleted, err
+}
+
+func (worker *Worker) markDeleted(ctx context.Context, claimed job) error {
+	_, err := worker.DB.Exec(ctx,
+		`UPDATE scheduler_projections SET status='superseded',last_error_code='card_deleted',updated_at=now()
+		 WHERE user_id=$1 AND note_guid=$2 AND card_ord=$3
+		   AND job_id=$4::uuid AND status='running'`,
+		claimed.UserID, claimed.NoteGUID, claimed.CardOrd, claimed.JobID,
 	)
 	return err
 }

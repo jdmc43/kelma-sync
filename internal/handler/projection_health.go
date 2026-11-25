@@ -36,9 +36,9 @@ func (h *Handler) InternalProjectionHealth(w http.ResponseWriter, r *http.Reques
 		   COUNT(*) FILTER (WHERE status='succeeded'),
 		   COUNT(*) FILTER (WHERE status='failed'),
 		   COUNT(*) FILTER (WHERE status='superseded'),
-		   COUNT(*) FILTER (WHERE applied_history_hash IS DISTINCT FROM desired_history_hash
+		   COUNT(*) FILTER (WHERE status<>'superseded' AND (applied_history_hash IS DISTINCT FROM desired_history_hash
 		                     OR applied_through_review_id IS DISTINCT FROM desired_through_review_id
-		                     OR applied_profile_version IS DISTINCT FROM desired_profile_version),
+		                     OR applied_profile_version IS DISTINCT FROM desired_profile_version)),
 		   COUNT(*) FILTER (WHERE status='failed' AND attempt_count>=5),
 		   COALESCE(MAX(attempt_count),0),
 		   COALESCE(EXTRACT(EPOCH FROM
@@ -48,9 +48,9 @@ func (h *Handler) InternalProjectionHealth(w http.ResponseWriter, r *http.Reques
 		   COALESCE(EXTRACT(EPOCH FROM
 		     (now()-MIN(updated_at) FILTER (WHERE status='failed'))),0)::bigint,
 		   COALESCE(EXTRACT(EPOCH FROM
-		     (now()-MIN(updated_at) FILTER (WHERE applied_history_hash IS DISTINCT FROM desired_history_hash
+		     (now()-MIN(updated_at) FILTER (WHERE status<>'superseded' AND (applied_history_hash IS DISTINCT FROM desired_history_hash
 		       OR applied_through_review_id IS DISTINCT FROM desired_through_review_id
-		       OR applied_profile_version IS DISTINCT FROM desired_profile_version))),0)::bigint
+		       OR applied_profile_version IS DISTINCT FROM desired_profile_version)))),0)::bigint
 		 FROM scheduler_projections`,
 	).Scan(
 		&response.Total, &response.Pending, &response.Running,
